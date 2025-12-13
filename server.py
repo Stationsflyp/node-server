@@ -28,7 +28,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT,
-                token TEXT
+                token TEXT UNIQUE
             )
         """)
         cursor.execute("""
@@ -51,7 +51,7 @@ def auth_user(token: str = Form(...)):
         row = cursor.fetchone()
         if not row:
             raise HTTPException(403, "Token inválido")
-        return row[0]
+        return row[0]  # devuelve el username asociado al token
 
 @app.post("/auth_discord")
 def auth_discord(username: str = Form(...)):
@@ -68,20 +68,22 @@ def auth_discord(username: str = Form(...)):
 
 # ----------- Upload -----------
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...), user: str = Depends(auth_user)):
+async def upload_file(file: UploadFile = File(...), username: str = Depends(auth_user)):
     ext = file.filename.split(".")[-1]
     file_id = str(uuid.uuid4())
     saved_name = f"{file_id}.{ext}"
     path = os.path.join(UPLOAD_DIR, saved_name)
 
+    # Guardar archivo
     with open(path, "wb") as f:
         f.write(await file.read())
 
+    # Guardar info en DB
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO files (filename, stored_as, owner) VALUES (?, ?, ?)",
-            (file.filename, saved_name, user)
+            (file.filename, saved_name, username)
         )
         conn.commit()
 
@@ -90,10 +92,10 @@ async def upload_file(file: UploadFile = File(...), user: str = Depends(auth_use
 
 # ----------- List files -----------
 @app.post("/my_files")
-def list_files(user: str = Depends(auth_user)):
+def list_files(username: str = Depends(auth_user)):
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, filename, stored_as FROM files WHERE owner=?", (user,))
+        cursor.execute("SELECT id, filename, stored_as FROM files WHERE owner=?", (username,))
         files = cursor.fetchall()
     return {"files": [{"id": f[0], "name": f[1], "stored": f[2]} for f in files]}
 
@@ -112,10 +114,10 @@ def download(file_id: str):
 
 # ----------- Delete -----------
 @app.post("/delete")
-def delete_file(file_id: str = Form(...), user: str = Depends(auth_user)):
+def delete_file(file_id: str = Form(...), username: str = Depends(auth_user)):
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT stored_as FROM files WHERE stored_as=? AND owner=?", (file_id, user))
+        cursor.execute("SELECT stored_as FROM files WHERE stored_as=? AND owner=?", (file_id, username))
         row = cursor.fetchone()
         if not row:
             raise HTTPException(404, "Archivo no encontrado o sin permisos")
