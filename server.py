@@ -1,21 +1,17 @@
 import uuid
 import os
 import sqlite3
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-# Tu IP pública y puerto
 PUBLIC_IP = "64.181.220.231"
 PORT = 8000
-
-# Carpeta de uploads
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 app = FastAPI()
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,32 +20,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------- BASE DE DATOS ----------
+# ----------- DB -----------
 def init_db():
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
         cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT,
-            token TEXT
-        )
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT,
+                token TEXT
+            )
         """)
         cursor.execute("""
-        CREATE TABLE IF NOT EXISTS files (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT,
-            stored_as TEXT,
-            owner TEXT
-        )
+            CREATE TABLE IF NOT EXISTS files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT,
+                stored_as TEXT,
+                owner TEXT
+            )
         """)
         conn.commit()
 
 init_db()
 
-# ---------- AUTENTICACIÓN ----------
-def auth_user(token: str):
-    """Valida token y retorna el username"""
+# ----------- Auth -----------
+def auth_user(token: str = Form(...)):
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT username FROM users WHERE token=?", (token,))
@@ -60,7 +55,6 @@ def auth_user(token: str):
 
 @app.post("/auth_discord")
 def auth_discord(username: str = Form(...)):
-    """Crea o retorna token para un usuario"""
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT token FROM users WHERE username=?", (username,))
@@ -72,11 +66,9 @@ def auth_discord(username: str = Form(...)):
         conn.commit()
         return {"username": username, "token": new_token}
 
-# ---------- SUBIR ARCHIVO ----------
+# ----------- Upload -----------
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...), token: str = Form(...)):
-    user = auth_user(token)  # Validar token
-
+async def upload_file(file: UploadFile = File(...), user: str = Depends(auth_user)):
     ext = file.filename.split(".")[-1]
     file_id = str(uuid.uuid4())
     saved_name = f"{file_id}.{ext}"
@@ -96,17 +88,16 @@ async def upload_file(file: UploadFile = File(...), token: str = Form(...)):
     download_url = f"http://{PUBLIC_IP}:{PORT}/download/{saved_name}"
     return {"success": True, "filename_original": file.filename, "file_id": saved_name, "download_url": download_url}
 
-# ---------- LISTAR ARCHIVOS ----------
+# ----------- List files -----------
 @app.post("/my_files")
-def list_files(token: str = Form(...)):
-    user = auth_user(token)
+def list_files(user: str = Depends(auth_user)):
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id, filename, stored_as FROM files WHERE owner=?", (user,))
         files = cursor.fetchall()
     return {"files": [{"id": f[0], "name": f[1], "stored": f[2]} for f in files]}
 
-# ---------- DESCARGAR ----------
+# ----------- Download -----------
 @app.get("/download/{file_id}")
 def download(file_id: str):
     path = os.path.join(UPLOAD_DIR, file_id)
@@ -119,10 +110,9 @@ def download(file_id: str):
         original_name = row[0] if row else file_id
     return FileResponse(path, filename=original_name)
 
-# ---------- ELIMINAR ----------
+# ----------- Delete -----------
 @app.post("/delete")
-def delete_file(file_id: str = Form(...), token: str = Form(...)):
-    user = auth_user(token)
+def delete_file(file_id: str = Form(...), user: str = Depends(auth_user)):
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT stored_as FROM files WHERE stored_as=? AND owner=?", (file_id, user))
