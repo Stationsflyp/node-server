@@ -1,7 +1,7 @@
 import uuid
 import os
 import sqlite3
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -72,7 +72,10 @@ def auth_discord(username: str = Form(...)):
 
 # ---------- SUBIR ARCHIVO ----------
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...), user: str = Depends(auth_user)):
+async def upload_file(file: UploadFile = File(...), token: str = Form(...)):
+    # Validar usuario
+    user = auth_user(token)
+
     ext = file.filename.split(".")[-1]
     file_id = str(uuid.uuid4())
     saved_name = f"{file_id}.{ext}"
@@ -94,7 +97,8 @@ async def upload_file(file: UploadFile = File(...), user: str = Depends(auth_use
 
 # ---------- LISTAR ARCHIVOS ----------
 @app.post("/my_files")
-def list_files(user: str = Depends(auth_user)):
+def list_files(token: str = Form(...)):
+    user = auth_user(token)
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id, filename, stored_as FROM files WHERE owner=?", (user,))
@@ -116,7 +120,8 @@ def download(file_id: str):
 
 # ---------- ELIMINAR ----------
 @app.post("/delete")
-def delete_file(file_id: str = Form(...), user: str = Depends(auth_user)):
+def delete_file(file_id: str = Form(...), token: str = Form(...)):
+    user = auth_user(token)
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT stored_as FROM files WHERE stored_as=? AND owner=?", (file_id, user))
