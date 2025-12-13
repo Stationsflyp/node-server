@@ -48,7 +48,8 @@ def init_db():
 init_db()
 
 # ---------- AUTENTICACIÓN ----------
-def auth_user(token: str = Form(...)):
+def auth_user(token: str):
+    """Valida token y retorna el username"""
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT username FROM users WHERE token=?", (token,))
@@ -59,6 +60,7 @@ def auth_user(token: str = Form(...)):
 
 @app.post("/auth_discord")
 def auth_discord(username: str = Form(...)):
+    """Crea o retorna token para un usuario"""
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT token FROM users WHERE username=?", (username,))
@@ -73,8 +75,7 @@ def auth_discord(username: str = Form(...)):
 # ---------- SUBIR ARCHIVO ----------
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...), token: str = Form(...)):
-    # Validar usuario
-    user = auth_user(token)
+    user = auth_user(token)  # Validar token
 
     ext = file.filename.split(".")[-1]
     file_id = str(uuid.uuid4())
