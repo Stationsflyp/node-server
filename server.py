@@ -1,7 +1,7 @@
 import uuid
 import os
 import sqlite3
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -27,8 +27,7 @@ def init_db():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT,
-                token TEXT UNIQUE
+                username TEXT UNIQUE
             )
         """)
         cursor.execute("""
@@ -43,32 +42,22 @@ def init_db():
 
 init_db()
 
-# ----------- Auth -----------
-def auth_user(token: str = Form(...)):
-    with sqlite3.connect("database.db") as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT username FROM users WHERE token=?", (token,))
-        row = cursor.fetchone()
-        if not row:
-            raise HTTPException(403, "Token inválido")
-        return row[0]  # devuelve el username asociado al token
-
+# ----------- Auth Discord (solo guardar usuario) -----------
 @app.post("/auth_discord")
 def auth_discord(username: str = Form(...)):
+    """Aquí ya solo registramos el usuario si no existe"""
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT token FROM users WHERE username=?", (username,))
+        cursor.execute("SELECT username FROM users WHERE username=?", (username,))
         row = cursor.fetchone()
-        if row:
-            return {"username": username, "token": row[0]}
-        new_token = str(uuid.uuid4())
-        cursor.execute("INSERT INTO users (username, token) VALUES (?, ?)", (username, new_token))
-        conn.commit()
-        return {"username": username, "token": new_token}
+        if not row:
+            cursor.execute("INSERT INTO users (username) VALUES (?)", (username,))
+            conn.commit()
+    return {"username": username}
 
 # ----------- Upload -----------
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...), username: str = Depends(auth_user)):
+async def upload_file(username: str = Form(...), file: UploadFile = File(...)):
     ext = file.filename.split(".")[-1]
     file_id = str(uuid.uuid4())
     saved_name = f"{file_id}.{ext}"
@@ -92,7 +81,7 @@ async def upload_file(file: UploadFile = File(...), username: str = Depends(auth
 
 # ----------- List files -----------
 @app.post("/my_files")
-def list_files(username: str = Depends(auth_user)):
+def list_files(username: str = Form(...)):
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id, filename, stored_as FROM files WHERE owner=?", (username,))
@@ -114,7 +103,7 @@ def download(file_id: str):
 
 # ----------- Delete -----------
 @app.post("/delete")
-def delete_file(file_id: str = Form(...), username: str = Depends(auth_user)):
+def delete_file(username: str = Form(...), file_id: str = Form(...)):
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT stored_as FROM files WHERE stored_as=? AND owner=?", (file_id, username))
