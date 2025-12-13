@@ -5,71 +5,79 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-# Crear carpetas
+# ---------------- CONFIG ----------------
 UPLOAD_DIR = "uploads"
+DB_NAME = "database.db"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 app = FastAPI()
 
-# CORS para que la web pueda hacer fetch()
+# CORS (producción)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://oxcyshopcloud.netlify.app",
+        "http://localhost:3000"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -------- BASE DE DATOS ----------
+# ---------------- DATABASE ----------------
 def init_db():
-    with sqlite3.connect("database.db") as conn:
+    with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
+
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT,
+            username TEXT UNIQUE,
             token TEXT
         )
         """)
+
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             filename TEXT,
             stored_as TEXT,
-            owner TEXT
+            owner TEXT,
+            password TEXT
         )
         """)
+
         conn.commit()
 
 init_db()
 
-
-# -------- VALIDAR TOKEN ----------
+# ---------------- AUTH ----------------
 def auth_user(token: str = Form(...)):
-    with sqlite3.connect("database.db") as conn:
+    with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT username FROM users WHERE token=?", (token,))
-        data = cursor.fetchone()
-        if not data:
-            raise HTTPException(status_code=403, detail="Token inválido")
-        return data[0]
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(403, "Token inválido")
+        return row[0]
 
-
-# -------- CREAR TOKEN (admin) --------
+# ---------------- CREATE TOKEN ----------------
 @app.post("/create_token")
 def create_token(username: str = Form(...)):
-    new_token = str(uuid.uuid4())
-    with sqlite3.connect("database.db") as conn:
+    token = str(uuid.uuid4())
+    with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO users (username, token) VALUES (?, ?)", (username, new_token))
+        cursor.execute(
+            "INSERT OR IGNORE INTO users (username, token) VALUES (?, ?)",
+            (username, token)
+        )
         conn.commit()
-    return {"username": username, "token": new_token}
+    return {"username": username, "token": token}
 
-
-# -------- AUTH DISCORD (Login/Register) --------
+# ---------------- DISCORD AUTH ----------------
 @app.post("/auth_discord")
 def auth_discord(username: str = Form(...)):
-    with sqlite3.connect("database.db") as conn:
+    with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT token FROM users WHERE username=?", (username,))
         row = cursor.fetchone()
@@ -77,123 +85,126 @@ def auth_discord(username: str = Form(...)):
         if row:
             return {"username": username, "token": row[0]}
 
-        new_token = str(uuid.uuid4())
-        cursor.execute("INSERT INTO users (username, token) VALUES (?, ?)", (username, new_token))
+        token = str(uuid.uuid4())
+        cursor.execute(
+            "INSERT INTO users (username, token) VALUES (?, ?)",
+            (username, token)
+        )
         conn.commit()
-        return {"username": username, "token": new_token}
+        return {"username": username, "token": token}
 
-
-# -------- SUBIR ARCHIVO --------
+# ---------------- UPLOAD ----------------
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...), user: str = Depends(auth_user)):
-    ext = file.filename.split(".")[-1]
-    file_id = str(uuid.uuid4())
-    saved_name = f"{file_id}.{ext}"
-    path = os.path.join(UPLOAD_DIR, saved_name)
+async def upload_file(
+    file: UploadFile = File(...),
+    user: str = Depends(auth_user)
+):
+    ext = file.filename.split(".")[-1] if "." in file.filename else "bin"
+    file_id = f"{uuid.uuid4()}.{ext}"
+    path = os.path.join(UPLOAD_DIR, file_id)
 
     with open(path, "wb") as f:
         f.write(await file.read())
 
-    with sqlite3.connect("database.db") as conn:
+    with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO files (filename, stored_as, owner) VALUES (?, ?, ?)",
-            (file.filename, saved_name, user)
+            (file.filename, file_id, user)
         )
         conn.commit()
 
     return {
         "success": True,
-        "filename_original": file.filename,
-        "file_id": saved_name,
-        "download_url": f"/download/{saved_name}"
+        "file_id": file_id,
+        "download_url": f"/download/{file_id}"
     }
 
-
-# -------- LISTAR ARCHIVOS DEL USUARIO --------
+# ---------------- LIST FILES ----------------
 @app.post("/my_files")
-def list_files(token: str = Form(...)):
-    with sqlite3.connect("database.db") as conn:
+def my_files(token: str = Form(...)):
+    with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT username FROM users WHERE token=?", (token,))
-        row = cursor.fetchone()
-        if not row:
+        user = cursor.fetchone()
+        if not user:
             raise HTTPException(403, "Token inválido")
-        username = row[0]
 
-        cursor.execute("SELECT id, filename, stored_as FROM files WHERE owner=?", (username,))
+        cursor.execute(
+            "SELECT id, filename, stored_as FROM files WHERE owner=?",
+            (user[0],)
+        )
         files = cursor.fetchall()
 
-    return {
-        "owner": username,
-        "files": [{"id": f[0], "name": f[1], "stored": f[2]} for f in files]
-    }
+    return {"files": [
+        {"id": f[0], "name": f[1], "file_id": f[2]} for f in files
+    ]}
 
-
-# -------- DESCARGAR --------
+# ---------------- DOWNLOAD ----------------
 @app.get("/download/{file_id}")
-def download(file_id: str):
-    path = os.path.join(UPLOAD_DIR, file_id)
-    if not os.path.exists(path):
-        raise HTTPException(404, "Archivo no existe")
-    # Mantener el nombre original en la descarga
-    with sqlite3.connect("database.db") as conn:
+def download(file_id: str, password: str = None):
+    with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT filename FROM files WHERE stored_as=?", (file_id,))
+        cursor.execute(
+            "SELECT filename, password FROM files WHERE stored_as=?",
+            (file_id,)
+        )
         row = cursor.fetchone()
-        original_name = row[0] if row else file_id
-    return FileResponse(path, filename=original_name)
 
+    if not row:
+        raise HTTPException(404, "Archivo no existe")
 
-# -------- ESTABLECER CONTRASEÑA --------
+    if row[1] and row[1] != password:
+        raise HTTPException(403, "Contraseña incorrecta")
+
+    path = os.path.join(UPLOAD_DIR, file_id)
+    return FileResponse(path, filename=row[0])
+
+# ---------------- SET PASSWORD ----------------
 @app.post("/set_password")
-def set_password(file_id: str = Form(...), password: str = Form(...), token: str = Form(...)):
-    with sqlite3.connect("database.db") as conn:
+def set_password(
+    file_id: str = Form(...),
+    password: str = Form(...),
+    token: str = Form(...)
+):
+    with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT username FROM users WHERE token=?", (token,))
-        row = cursor.fetchone()
-        if not row:
+        user = cursor.fetchone()
+        if not user:
             raise HTTPException(403, "Token inválido")
-        username = row[0]
 
-        cursor.execute("SELECT stored_as FROM files WHERE stored_as=? AND owner=?", (file_id, username))
-        if not cursor.fetchone():
-            raise HTTPException(404, "Archivo no encontrado o no tienes permisos")
-
-        try:
-            cursor.execute("ALTER TABLE files ADD COLUMN password TEXT")
-        except sqlite3.OperationalError:
-            pass
-
-        cursor.execute("UPDATE files SET password=? WHERE stored_as=?", (password, file_id))
+        cursor.execute(
+            "UPDATE files SET password=? WHERE stored_as=? AND owner=?",
+            (password, file_id, user[0])
+        )
         conn.commit()
 
     return {"success": True}
 
-
-# -------- ELIMINAR ARCHIVO --------
+# ---------------- DELETE ----------------
 @app.post("/delete")
 def delete_file(file_id: str = Form(...), token: str = Form(...)):
-    with sqlite3.connect("database.db") as conn:
+    with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT username FROM users WHERE token=?", (token,))
+        user = cursor.fetchone()
+        if not user:
+            raise HTTPException(403, "Token inválido")
+
+        cursor.execute(
+            "SELECT stored_as FROM files WHERE stored_as=? AND owner=?",
+            (file_id, user[0])
+        )
         row = cursor.fetchone()
         if not row:
-            raise HTTPException(403, "Token inválido")
-        username = row[0]
+            raise HTTPException(404, "Sin permisos")
 
-        cursor.execute("SELECT stored_as FROM files WHERE stored_as=? AND owner=?", (file_id, username))
-        file_row = cursor.fetchone()
-        if not file_row:
-            raise HTTPException(404, "No tienes permisos para borrar este archivo")
-
-        stored_file = file_row[0]
-        path = os.path.join(UPLOAD_DIR, stored_file)
-
+        path = os.path.join(UPLOAD_DIR, file_id)
         if os.path.exists(path):
             os.remove(path)
 
-        cursor.execute("DELETE FROM files WHERE stored_as=?", (stored_file,))
+        cursor.execute("DELETE FROM files WHERE stored_as=?", (file_id,))
         conn.commit()
 
-    return {"success": True, "deleted": stored_file}
+    return {"success": True}
