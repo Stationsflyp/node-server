@@ -1,7 +1,7 @@
 import uuid
 import os
 import sqlite3
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -9,13 +9,13 @@ from fastapi.middleware.cors import CORSMiddleware
 PUBLIC_IP = "64.181.220.231"
 PORT = 8000
 
-# Crear carpeta de uploads
+# Carpeta de uploads
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 app = FastAPI()
 
-# CORS para permitir peticiones desde cualquier front
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,24 +24,55 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------- BASE DE DATOS ----------
+# ---------- BASE DE DATOS ----------
 def init_db():
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
         cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            token TEXT
+        )
+        """)
+        cursor.execute("""
         CREATE TABLE IF NOT EXISTS files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             filename TEXT,
-            stored_as TEXT
+            stored_as TEXT,
+            owner TEXT
         )
         """)
         conn.commit()
 
 init_db()
 
-# -------- SUBIR ARCHIVO --------
+# ---------- AUTENTICACIÓN ----------
+def auth_user(token: str = Form(...)):
+    with sqlite3.connect("database.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT username FROM users WHERE token=?", (token,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(403, "Token inválido")
+        return row[0]
+
+@app.post("/auth_discord")
+def auth_discord(username: str = Form(...)):
+    with sqlite3.connect("database.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT token FROM users WHERE username=?", (username,))
+        row = cursor.fetchone()
+        if row:
+            return {"username": username, "token": row[0]}
+        new_token = str(uuid.uuid4())
+        cursor.execute("INSERT INTO users (username, token) VALUES (?, ?)", (username, new_token))
+        conn.commit()
+        return {"username": username, "token": new_token}
+
+# ---------- SUBIR ARCHIVO ----------
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...), user: str = Depends(auth_user)):
     ext = file.filename.split(".")[-1]
     file_id = str(uuid.uuid4())
     saved_name = f"{file_id}.{ext}"
@@ -50,63 +81,54 @@ async def upload_file(file: UploadFile = File(...)):
     with open(path, "wb") as f:
         f.write(await file.read())
 
-    # Guardar en la base de datos
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO files (filename, stored_as) VALUES (?, ?)",
-            (file.filename, saved_name)
+            "INSERT INTO files (filename, stored_as, owner) VALUES (?, ?, ?)",
+            (file.filename, saved_name, user)
         )
         conn.commit()
 
     download_url = f"http://{PUBLIC_IP}:{PORT}/download/{saved_name}"
-    return {
-        "success": True,
-        "filename_original": file.filename,
-        "file_id": saved_name,
-        "download_url": download_url
-    }
+    return {"success": True, "filename_original": file.filename, "file_id": saved_name, "download_url": download_url}
 
-# -------- LISTAR ARCHIVOS --------
-@app.get("/files")
-def list_files():
+# ---------- LISTAR ARCHIVOS ----------
+@app.post("/my_files")
+def list_files(user: str = Depends(auth_user)):
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, filename, stored_as FROM files")
+        cursor.execute("SELECT id, filename, stored_as FROM files WHERE owner=?", (user,))
         files = cursor.fetchall()
     return {"files": [{"id": f[0], "name": f[1], "stored": f[2]} for f in files]}
 
-# Alias POST para compatibilidad con front
-@app.post("/my_files")
-def my_files_alias():
-    return list_files()
-
-# -------- DESCARGAR --------
+# ---------- DESCARGAR ----------
 @app.get("/download/{file_id}")
 def download(file_id: str):
     path = os.path.join(UPLOAD_DIR, file_id)
     if not os.path.exists(path):
         raise HTTPException(404, "Archivo no existe")
-
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT filename FROM files WHERE stored_as=?", (file_id,))
         row = cursor.fetchone()
         original_name = row[0] if row else file_id
-
     return FileResponse(path, filename=original_name)
 
-# -------- ELIMINAR ARCHIVO --------
+# ---------- ELIMINAR ----------
 @app.post("/delete")
-def delete_file(file_id: str = Form(...)):
-    path = os.path.join(UPLOAD_DIR, file_id)
-    if not os.path.exists(path):
-        raise HTTPException(404, "Archivo no existe")
-
+def delete_file(file_id: str = Form(...), user: str = Depends(auth_user)):
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
+        cursor.execute("SELECT stored_as FROM files WHERE stored_as=? AND owner=?", (file_id, user))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(404, "Archivo no encontrado o sin permisos")
+
         cursor.execute("DELETE FROM files WHERE stored_as=?", (file_id,))
         conn.commit()
 
-    os.remove(path)
+    path = os.path.join(UPLOAD_DIR, file_id)
+    if os.path.exists(path):
+        os.remove(path)
+
     return {"success": True, "deleted": file_id}
