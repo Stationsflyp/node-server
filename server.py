@@ -41,7 +41,8 @@ init_db()
 
 # -------- SUBIR ARCHIVO --------
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...), token: str = Form(...)):
+    # Aquí puedes validar el token si quieres
     ext = file.filename.split(".")[-1]
     file_id = str(uuid.uuid4())
     saved_name = f"{file_id}.{ext}"
@@ -50,7 +51,6 @@ async def upload_file(file: UploadFile = File(...)):
     with open(path, "wb") as f:
         f.write(await file.read())
 
-    # Guardar en la base de datos
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -76,9 +76,10 @@ def list_files():
         files = cursor.fetchall()
     return {"files": [{"id": f[0], "name": f[1], "stored": f[2]} for f in files]}
 
-# Alias POST para compatibilidad con front
+# Alias POST para compatibilidad con front (acepta token)
 @app.post("/my_files")
-def my_files_alias():
+def my_files_alias(token: str = Form(...)):
+    # Opcional: validar token
     return list_files()
 
 # -------- DESCARGAR --------
@@ -98,7 +99,8 @@ def download(file_id: str):
 
 # -------- ELIMINAR ARCHIVO --------
 @app.post("/delete")
-def delete_file(file_id: str = Form(...)):
+def delete_file(token: str = Form(...), file_id: str = Form(...)):
+    # Opcional: validar token
     path = os.path.join(UPLOAD_DIR, file_id)
     if not os.path.exists(path):
         raise HTTPException(404, "Archivo no existe")
