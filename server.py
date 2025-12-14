@@ -5,11 +5,11 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-# Tu IP pública y puerto
+# IP pública y puerto (solo se usa si quieres generar URLs externas, con ngrok esto no es necesario)
 PUBLIC_IP = "64.181.220.231"
 PORT = 8000
 
-# Crear carpeta de uploads
+# Carpeta para uploads
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -24,7 +24,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------- BASE DE DATOS ----------
+# ---------- BASE DE DATOS ----------
 def init_db():
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
@@ -39,10 +39,10 @@ def init_db():
 
 init_db()
 
-# -------- SUBIR ARCHIVO --------
+# ---------- SUBIR ARCHIVO ----------
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...), token: str = Form(...)):
-    # Aquí puedes validar el token si quieres
+    # Optional: validar token aquí
     ext = file.filename.split(".")[-1]
     file_id = str(uuid.uuid4())
     saved_name = f"{file_id}.{ext}"
@@ -51,6 +51,7 @@ async def upload_file(file: UploadFile = File(...), token: str = Form(...)):
     with open(path, "wb") as f:
         f.write(await file.read())
 
+    # Guardar en DB
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -59,7 +60,9 @@ async def upload_file(file: UploadFile = File(...), token: str = Form(...)):
         )
         conn.commit()
 
+    # URL de descarga usando ngrok o IP local
     download_url = f"http://{PUBLIC_IP}:{PORT}/download/{saved_name}"
+
     return {
         "success": True,
         "filename_original": file.filename,
@@ -67,7 +70,7 @@ async def upload_file(file: UploadFile = File(...), token: str = Form(...)):
         "download_url": download_url
     }
 
-# -------- LISTAR ARCHIVOS --------
+# ---------- LISTAR ARCHIVOS ----------
 @app.get("/files")
 def list_files():
     with sqlite3.connect("database.db") as conn:
@@ -76,18 +79,18 @@ def list_files():
         files = cursor.fetchall()
     return {"files": [{"id": f[0], "name": f[1], "stored": f[2]} for f in files]}
 
-# Alias POST para compatibilidad con front (acepta token)
+# POST alias para front
 @app.post("/my_files")
 def my_files_alias(token: str = Form(...)):
-    # Opcional: validar token
+    # Optional: validar token
     return list_files()
 
-# -------- DESCARGAR --------
+# ---------- DESCARGAR ----------
 @app.get("/download/{file_id}")
 def download(file_id: str):
     path = os.path.join(UPLOAD_DIR, file_id)
     if not os.path.exists(path):
-        raise HTTPException(404, "Archivo no existe")
+        raise HTTPException(status_code=404, detail="Archivo no existe")
 
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
@@ -97,13 +100,13 @@ def download(file_id: str):
 
     return FileResponse(path, filename=original_name)
 
-# -------- ELIMINAR ARCHIVO --------
+# ---------- ELIMINAR ----------
 @app.post("/delete")
 def delete_file(token: str = Form(...), file_id: str = Form(...)):
-    # Opcional: validar token
+    # Optional: validar token
     path = os.path.join(UPLOAD_DIR, file_id)
     if not os.path.exists(path):
-        raise HTTPException(404, "Archivo no existe")
+        raise HTTPException(status_code=404, detail="Archivo no existe")
 
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
